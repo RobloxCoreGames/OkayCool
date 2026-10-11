@@ -1,0 +1,1325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jib Simulator</title>
+<style>
+  :root { --panel: rgba(14,16,22,.9); --text:#e9edf3; --muted:#9aa4b2; --accent:#ff7a1a; --line:#2a2f3a; }
+  html, body { margin:0; height:100%; background:#0d0f13; color:var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow:hidden; }
+  canvas { display:block; }
+  #panel { position:fixed; left:16px; top:16px; width:min(430px, calc(100vw - 32px)); box-sizing:border-box;
+    background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px;
+    max-height:calc(100vh - 32px); overflow:auto; backdrop-filter:blur(6px); }
+  #panel h1 { margin:0 0 4px; font-size:20px; letter-spacing:.3px; }
+  #panel h1 span { color:var(--accent); }
+  #panel p { margin:6px 0; color:var(--muted); font-size:14px; line-height:1.45; }
+  .btns { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 6px; }
+  button.xr { appearance:none; border:0; border-radius:10px; padding:12px 18px; font-size:16px; font-weight:600;
+    background:var(--accent); color:#1a0d00; cursor:pointer; }
+  button.xr.alt { background:#2b3140; color:var(--text); }
+  button.xr:disabled { opacity:.4; cursor:default; }
+  details { margin-top:10px; font-size:14px; color:var(--muted); }
+  details summary { cursor:pointer; color:var(--text); font-weight:600; }
+  details ul { padding-left:18px; margin:8px 0; }
+  details li { margin:3px 0; line-height:1.4; }
+  kbd { background:#262b36; border:1px solid #3a4150; border-radius:4px; padding:0 5px; font-size:12px; color:var(--text); }
+  #hide { position:absolute; right:10px; top:8px; background:none; border:0; color:var(--muted); font-size:18px; cursor:pointer; }
+  #show { position:fixed; left:16px; top:16px; display:none; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <button id="hide" title="Hide panel">✕</button>
+  <h1>Jib <span>Simulator</span></h1>
+  <p>A camera crane with a remote head. Walk up to it, grab the handlebar and fly the shot while you watch the monitor.</p>
+  <div class="btns">
+    <button class="xr" id="btnVR" disabled>Enter VR</button>
+    <button class="xr alt" id="btnMR" disabled>Mixed Reality</button>
+  </div>
+  <p id="xrMsg">Checking for VR support…</p>
+  <details open>
+    <summary>In the headset (hands or controllers)</summary>
+    <ul>
+      <li><b>Grab</b>: close your fist around a part (or squeeze the grip button on a controller).</li>
+      <li><b>Handlebar</b>: push, pull, lift and lower it to swing and boom the arm. It has real weight and keeps drifting when you let go.</li>
+      <li><b>Left grip</b>: twist it like a motorbike throttle to zoom. Roll it back to zoom in, forward to zoom out.</li>
+      <li><b>Joystick</b> (right side of the control box): pans and tilts the camera head.</li>
+      <li><b>Focus knob</b> (left side of the box): turn it to pull focus, or press <b>AF</b> to make it follow the actor.</li>
+      <li><b>Counterweights</b>: grab and slide them to balance the arm.</li>
+      <li><b>Column</b>: grab it to roll the whole dolly.</li>
+      <li><b>Buttons</b>: poke them with a fingertip. REC, PLAY, AF, GUIDE, DRAG, FIT. FIT moves you behind the handlebar and sets the height for you.</li>
+      <li>Controllers also have shortcuts: right stick pans and tilts, left stick zooms and focuses, A records, B plays back.</li>
+    </ul>
+  </details>
+  <details>
+    <summary>On a computer (for testing)</summary>
+    <ul>
+      <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> push the arm. <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> pan and tilt.</li>
+      <li><kbd>Q</kbd>/<kbd>E</kbd> zoom, <kbd>Z</kbd>/<kbd>C</kbd> focus, <kbd>F</kbd> AF, <kbd>R</kbd> record, <kbd>P</kbd> play, <kbd>G</kbd> guides, <kbd>T</kbd> drag.</li>
+      <li>Drag the mouse to look around.</li>
+      <li>Gamepad: left stick moves the arm, right stick pans and tilts, the triggers zoom, the bumpers focus, A records, B plays, X toggles AF, Y toggles guides.</li>
+    </ul>
+  </details>
+</div>
+<button class="xr alt" id="show">☰</button>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const V3 = THREE.Vector3;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const wrapAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+const damp = (dt, tau) => 1 - Math.exp(-dt / tau);
+
+// =====================================================================
+// Constants: lens, arm geometry, physics
+// =====================================================================
+const SENSOR_H = 14.0;            // Super35 16:9 sensor height in mm
+const T_STOP = 2.8;
+const F_MIN = 18, F_MAX = 135;    // zoom range (mm)
+const D_MIN = 0.45, D_MAX = 120;  // focus range (m)
+const RT_W = 1024, RT_H = 576;    // monitor feed resolution
+
+const ARM_FRONT = 3.0;
+const CROSS_X = -1.3, CROSS_Y = -0.3, BAR_HALF = 0.33;
+const BOX_ANCHOR = [-1.45, -0.22];
+const MON_ANCHOR = [-0.9, 0.06];
+const PITCH_MIN = -0.62, PITCH_MAX = 0.78;
+const CW_MASS = 30, CW_MIN = 0.62, CW_MAX = 1.12;
+const DRAGS = [{ n: 'LOW', b: 8 }, { n: 'MED', b: 22 }, { n: 'HIGH', b: 48 }];
+const K_HAND = 4400, C_HAND = 950, F_MAX_HAND = 380, T_STATIC = 4;
+const FIXED_MASSES = [ // [x, y, kg] in arm (pitch) coordinates
+  [3.0, 0, 9],              // remote head + camera
+  [1.5, 0, 5],              // front tube
+  [-0.66, 0, 2],            // rear tube
+  [CROSS_X, -0.2, 1.5],     // handlebar
+  [BOX_ANCHOR[0], BOX_ANCHOR[1], 1.2], // control box
+  [MON_ANCHOR[0], MON_ANCHOR[1] + 0.24, 1.4] // monitor
+];
+
+const uFromD = d => Math.log(d / D_MIN) / Math.log(D_MAX / D_MIN);
+const dFromU = u => D_MIN * Math.pow(D_MAX / D_MIN, u);
+
+// =====================================================================
+// State
+// =====================================================================
+const P = { yaw: Math.PI / 2, pitch: 0.0, wy: 0, wp: 0, cwD: 0.941,
+  base: new V3(0, 0, 4), baseVel: new V3(), pivotH: 1.35, drag: 1 };
+const H = { pan: 0, tilt: -0.04, panRate: 0, tiltRate: 0, logF: Math.log(28), zoomRate: 0,
+  focusU: uFromD(7), af: false, guides: true };
+const UI = { joyX: 0, joyY: 0, knobRot: 0, gripTwist: 0 };
+let actorClock = 0;
+let isAR = false;
+
+// =====================================================================
+// Renderer / scene
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFoveation(0.5);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xd8e3ee, 45, 170);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.03, 320);
+camera.position.set(0, 1.65, 6.0);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const hemi = new THREE.HemisphereLight(0xdfe8ff, 0x6b5a48, 0.45);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff1dc, 2.6);
+sun.position.set(14, 22, 6);
+sun.target.position.set(0, 0, -6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -22, right: 22, top: 22, bottom: -22, near: 1, far: 70 });
+sun.shadow.bias = -0.0005;
+sun.shadow.normalBias = 0.03;
+scene.add(sun, sun.target);
+
+// Groups
+const envOnly = new THREE.Group();   // backdrop: hidden in passthrough mode, still seen by the jib camera
+scene.add(envOnly);
+
+// =====================================================================
+// Texture helpers
+// =====================================================================
+function canvasTex(w, h, draw, repeat) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'); draw(g, w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  return t;
+}
+function rnd(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+const R = rnd(12345);
+
+// =====================================================================
+// Static environment (merged per material to keep draw calls low)
+// =====================================================================
+const batches = new Map();
+function stat(geo, mat, x, y, z, ry = 0, uvFn = null, rx = 0, rz = 0) {
+  const g = geo.index ? geo.toNonIndexed() : geo.clone();
+  if (uvFn) uvFn(g);
+  const m = new THREE.Matrix4().compose(new V3(x, y, z),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'YXZ')), new V3(1, 1, 1));
+  g.applyMatrix4(m);
+  if (!batches.has(mat)) batches.set(mat, []);
+  batches.get(mat).push(g);
+}
+function flushStatic(parent, cast = true) {
+  for (const [mat, list] of batches) {
+    const merged = mergeGeometries(list, false);
+    const mesh = new THREE.Mesh(merged, mat);
+    mesh.castShadow = cast; mesh.receiveShadow = true;
+    parent.add(mesh);
+  }
+  batches.clear();
+}
+
+// Sky
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { top: { value: new THREE.Color(0x4f86d4) }, hor: { value: new THREE.Color(0xdde6ef) }, bot: { value: new THREE.Color(0x8f8a82) } },
+  vertexShader: `varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `uniform vec3 top; uniform vec3 hor; uniform vec3 bot; varying vec3 vP;
+    void main(){ float h = vP.y; vec3 c = h > 0.0 ? mix(hor, top, pow(h, 0.55)) : mix(hor, bot, pow(-h, 0.35));
+      gl_FragColor = vec4(c, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(230, 32, 16), skyMat);
+sky.renderOrder = -1;
+envOnly.add(sky);
+
+// Ground
+const paveTex = canvasTex(512, 512, (g, w, h) => {
+  g.fillStyle = '#6f6c66'; g.fillRect(0, 0, w, h);
+  const n = 8, s = w / n;
+  for (let y = 0; y < n; y++) for (let x = -1; x < n; x++) {
+    const off = (y % 2) * s / 2, l = 128 + (R() * 34 | 0);
+    g.fillStyle = `rgb(${l},${l - 4},${l - 10})`;
+    g.fillRect(x * s + off + 2, y * s + 2, s - 4, s - 4);
+  }
+}, [40, 40]);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(120, 120),
+  new THREE.MeshStandardMaterial({ map: paveTex, roughness: 0.95, metalness: 0 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true;
+envOnly.add(ground);
+
+// Building facades
+function facadeTex(wall, trim) {
+  return canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = wall; g.fillRect(0, 0, w, h);
+    for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) {
+      const x = 28 + c * 128, y = 22 + r * 128;
+      g.fillStyle = trim; g.fillRect(x - 6, y - 6, 72 + 12, 92 + 12);
+      const lit = R() < 0.25;
+      const grd = g.createLinearGradient(x, y, x + 72, y + 92);
+      grd.addColorStop(0, lit ? '#f6dca0' : '#3d4a5c'); grd.addColorStop(1, lit ? '#d8b070' : '#1f2833');
+      g.fillStyle = grd; g.fillRect(x, y, 72, 92);
+      g.fillStyle = trim; g.fillRect(x + 34, y, 4, 92); g.fillRect(x, y + 44, 72, 4);
+      g.fillStyle = 'rgba(0,0,0,.25)'; g.fillRect(x - 8, y + 98, 88, 6);
+    }
+  }, [1, 1]);
+}
+const facadeMats = [
+  new THREE.MeshStandardMaterial({ map: facadeTex('#c9b79c', '#e8e0d0'), roughness: 0.9 }),
+  new THREE.MeshStandardMaterial({ map: facadeTex('#9c5b45', '#d9cbb6'), roughness: 0.9 }),
+  new THREE.MeshStandardMaterial({ map: facadeTex('#d6d2c8', '#7d8590'), roughness: 0.9 }),
+  new THREE.MeshStandardMaterial({ map: facadeTex('#6f7d74', '#e3ddd0'), roughness: 0.9 })
+];
+for (const m of facadeMats) { m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; }
+function building(x, z, w, d, h, ry, mi) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  stat(geo, facadeMats[mi % facadeMats.length], x, h / 2, z, ry, g => {
+    const uv = g.attributes.uv;
+    for (let i = 0; i < uv.count; i++) {
+      const face = Math.floor(i / 6);
+      if (face === 2 || face === 3) { uv.setXY(i, 0.01, 0.01); continue; }
+      const span = face < 2 ? d : w;
+      uv.setXY(i, uv.getX(i) * span / 6, uv.getY(i) * h / 7);
+    }
+  });
+}
+{
+  let x = -30; let i = 0;
+  while (x < 30) { const w = 8 + R() * 6; building(x + w / 2, -36, w, 10, 10 + R() * 14, 0, i++); x += w + 0.2; }
+  let z = -30; while (z < 22) { const w = 8 + R() * 5; building(-30, z + w / 2, 10, w, 9 + R() * 11, 0, i++); z += w + 0.2; }
+  z = -30; while (z < 22) { const w = 8 + R() * 5; building(30, z + w / 2, 10, w, 9 + R() * 11, 0, i++); z += w + 0.2; }
+  x = -30; while (x < 30) { const w = 9 + R() * 5; building(x + w / 2, 27, w, 10, 8 + R() * 8, 0, i++); x += w + 0.2; }
+}
+
+// Materials for props
+const matStone = new THREE.MeshStandardMaterial({ color: 0xbdb5a6, roughness: 0.85 });
+const matDark = new THREE.MeshStandardMaterial({ color: 0x23262b, roughness: 0.55, metalness: 0.4 });
+const matWood = new THREE.MeshStandardMaterial({ color: 0x8a5a36, roughness: 0.8 });
+const matTrunk = new THREE.MeshStandardMaterial({ color: 0x5b4330, roughness: 0.9 });
+const matLeaf = new THREE.MeshStandardMaterial({ color: 0x4d7a3a, roughness: 0.85, flatShading: true });
+const matLeaf2 = new THREE.MeshStandardMaterial({ color: 0x5f8c3e, roughness: 0.85, flatShading: true });
+const matGlow = new THREE.MeshStandardMaterial({ color: 0xfff3d6, emissive: 0xffe2a8, emissiveIntensity: 1.2 });
+const matWater = new THREE.MeshStandardMaterial({ color: 0x3b6f86, roughness: 0.05, metalness: 0.2 });
+const matCarRed = new THREE.MeshStandardMaterial({ color: 0xa3222a, roughness: 0.3, metalness: 0.5 });
+const matGlass = new THREE.MeshStandardMaterial({ color: 0x1b232c, roughness: 0.1, metalness: 0.6 });
+const matTire = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.9 });
+const matTable = new THREE.MeshStandardMaterial({ color: 0xe9e4da, roughness: 0.6 });
+const awningTex = canvasTex(256, 64, (g, w, h) => {
+  for (let i = 0; i < 16; i++) { g.fillStyle = i % 2 ? '#f3efe6' : '#2f6d5a'; g.fillRect(i * 16, 0, 16, h); }
+});
+const matAwning = new THREE.MeshStandardMaterial({ map: awningTex, roughness: 0.8, side: THREE.DoubleSide });
+
+// Fountain
+stat(new THREE.CylinderGeometry(3.0, 3.15, 0.55, 40), matStone, 0, 0.275, -12);
+stat(new THREE.CylinderGeometry(2.78, 2.78, 0.04, 40), matWater, 0, 0.47, -12);
+stat(new THREE.CylinderGeometry(0.35, 0.5, 1.6, 16), matStone, 0, 0.8, -12);
+stat(new THREE.CylinderGeometry(1.1, 0.35, 0.3, 24), matStone, 0, 1.7, -12);
+stat(new THREE.CylinderGeometry(1.0, 1.0, 0.03, 24), matWater, 0, 1.84, -12);
+stat(new THREE.CylinderGeometry(0.12, 0.18, 0.7, 12), matStone, 0, 2.1, -12);
+
+// Trees
+function tree(x, z, s) {
+  stat(new THREE.CylinderGeometry(0.12 * s, 0.18 * s, 2.4 * s, 8), matTrunk, x, 1.2 * s, z);
+  stat(new THREE.IcosahedronGeometry(1.4 * s, 1), R() < 0.5 ? matLeaf : matLeaf2, x, 3.0 * s, z);
+  stat(new THREE.IcosahedronGeometry(1.0 * s, 1), matLeaf2, x + 0.5 * s, 3.7 * s, z - 0.3 * s);
+}
+[[-12, -20], [12, -20], [-16, -12], [16, -12], [-14, 2], [14, 2], [-6, -26], [6, -26], [20, -24], [-20, -24]]
+  .forEach(([x, z]) => tree(x, z, 0.9 + R() * 0.35));
+
+// Lamps
+function lamp(x, z) {
+  stat(new THREE.CylinderGeometry(0.06, 0.09, 3.6, 10), matDark, x, 1.8, z);
+  stat(new THREE.CylinderGeometry(0.16, 0.16, 0.1, 10), matDark, x, 3.62, z);
+  stat(new THREE.SphereGeometry(0.2, 14, 10), matGlow, x, 3.85, z);
+}
+[[-8, -2], [8, -2], [-9, -20], [9, -20], [-18, -8], [18, -8]].forEach(([x, z]) => lamp(x, z));
+
+// Benches
+function bench(x, z, ry) {
+  const c = Math.cos(ry), s = Math.sin(ry);
+  const P2 = (lx, lz) => [x + lx * c + lz * s, z - lx * s + lz * c];
+  let p = P2(0, 0); stat(new THREE.BoxGeometry(1.8, 0.06, 0.45), matWood, p[0], 0.46, p[1], ry);
+  p = P2(0, -0.22); stat(new THREE.BoxGeometry(1.8, 0.4, 0.05), matWood, p[0], 0.75, p[1], ry, null, -0.15);
+  for (const lx of [-0.75, 0.75]) { p = P2(lx, 0); stat(new THREE.BoxGeometry(0.06, 0.46, 0.4), matDark, p[0], 0.23, p[1], ry); }
+}
+bench(-5.2, -12, Math.PI / 2); bench(5.2, -12, -Math.PI / 2); bench(0, -17.4, 0); bench(-10, -16, 0.6);
+
+// Cafe (left side)
+stat(new THREE.BoxGeometry(0.1, 0.05, 6.5), matDark, -24.4, 3.4, -6);
+stat(new THREE.PlaneGeometry(6.5, 2.2), matAwning, -23.9, 3.0, -6, Math.PI / 2, null, 0, 0);
+for (const [tx, tz] of [[-13, -6], [-15, -2.5], [-15.5, -9.5]]) {
+  stat(new THREE.CylinderGeometry(0.4, 0.4, 0.04, 20), matTable, tx, 0.74, tz);
+  stat(new THREE.CylinderGeometry(0.03, 0.03, 0.72, 8), matDark, tx, 0.37, tz);
+  stat(new THREE.CylinderGeometry(0.22, 0.22, 0.03, 12), matDark, tx, 0.015, tz);
+  for (const a of [0, Math.PI]) {
+    const cx = tx + Math.sin(a) * 0.65, cz = tz + Math.cos(a) * 0.65;
+    stat(new THREE.BoxGeometry(0.42, 0.04, 0.42), matWood, cx, 0.46, cz, a);
+    stat(new THREE.BoxGeometry(0.42, 0.45, 0.04), matWood, cx + Math.sin(a) * 0.2, 0.7, cz + Math.cos(a) * 0.2, a);
+    stat(new THREE.CylinderGeometry(0.025, 0.025, 0.46, 6), matDark, cx, 0.23, cz);
+  }
+}
+
+// Parked car (right side)
+function car(x, z, ry) {
+  const c = Math.cos(ry), s = Math.sin(ry);
+  const P2 = (lx, lz) => [x + lx * c + lz * s, z - lx * s + lz * c];
+  let p = P2(0, 0); stat(new THREE.BoxGeometry(4.2, 0.62, 1.8), matCarRed, p[0], 0.62, p[1], ry);
+  p = P2(-0.25, 0); stat(new THREE.BoxGeometry(2.2, 0.55, 1.6), matGlass, p[0], 1.2, p[1], ry);
+  for (const [lx, lz] of [[-1.35, -0.85], [1.35, -0.85], [-1.35, 0.85], [1.35, 0.85]]) {
+    p = P2(lx, lz); stat(new THREE.CylinderGeometry(0.34, 0.34, 0.24, 18), matTire, p[0], 0.34, p[1], ry, null, Math.PI / 2);
+  }
+}
+car(17, -4, Math.PI / 2 + 0.05); car(18.5, -15, Math.PI / 2 - 0.04);
+
+flushStatic(envOnly, true);
+
+// Shadow-catcher used only in passthrough mode
+const arShadow = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.ShadowMaterial({ opacity: 0.35 }));
+arShadow.rotation.x = -Math.PI / 2; arShadow.position.y = 0.002; arShadow.receiveShadow = true; arShadow.visible = false;
+scene.add(arShadow);
+
+// =====================================================================
+// Actors
+// =====================================================================
+function makePerson(o) {
+  const g = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: o.skin, roughness: 0.7 });
+  const top = new THREE.MeshStandardMaterial({ color: o.top, roughness: 0.8 });
+  const pants = new THREE.MeshStandardMaterial({ color: o.pants, roughness: 0.85 });
+  const shoe = new THREE.MeshStandardMaterial({ color: 0x1d1d1f, roughness: 0.6 });
+  const hairM = new THREE.MeshStandardMaterial({ color: o.hair, roughness: 0.9 });
+  const hips = new THREE.Group(); hips.position.y = 0.93; g.add(hips);
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.36, 4, 12), top);
+  torso.position.y = 0.33; torso.scale.set(1.12, 1, 0.68); hips.add(torso);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.055, 0.1, 10), skin); neck.position.y = 0.6; hips.add(neck);
+  const headG = new THREE.Group(); headG.position.y = 0.7; hips.add(headG);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.105, 18, 14), skin); head.scale.set(0.92, 1.06, 1); headG.add(head);
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.112, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.55), hairM);
+  hair.position.set(0, 0.012, -0.008); headG.add(hair);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.018, 0.04, 6), skin); nose.rotation.x = Math.PI / 2; nose.position.set(0, -0.005, 0.105); headG.add(nose);
+  const legs = [], arms = [];
+  for (const side of [-1, 1]) {
+    const lp = new THREE.Group(); lp.position.set(side * 0.095, 0.0, 0); hips.add(lp);
+    const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.068, 0.7, 4, 10), pants); leg.position.y = -0.42; lp.add(leg);
+    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.24), shoe); foot.position.set(0, -0.86, 0.05); lp.add(foot);
+    legs.push(lp);
+    const ap = new THREE.Group(); ap.position.set(side * 0.24, 0.53, 0); hips.add(ap);
+    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.48, 4, 10), top); arm.position.y = -0.29; ap.add(arm);
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), skin); hand.position.y = -0.59; ap.add(hand);
+    arms.push(ap);
+  }
+  g.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+  return { g, hips, headG, legs, arms };
+}
+
+const actor = makePerson({ skin: 0xc58c6a, top: 0xc9483a, pants: 0x2b3446, hair: 0x2a1d16 });
+scene.add(actor.g);
+const actorPath = new THREE.CatmullRomCurve3([
+  new V3(-7, 0, -5), new V3(-9, 0, -13), new V3(-3.5, 0, -19.5), new V3(5, 0, -18.5),
+  new V3(9, 0, -11), new V3(5.5, 0, -5), new V3(0.5, 0, -3.2)
+], true, 'catmullrom', 0.5);
+const PATH_L = actorPath.getLength();
+const WALK_V = 1.25, PAUSE_U = 0.9, PAUSE_T = 4.5;
+const T1 = PAUSE_U * PATH_L / WALK_V, T_TOTAL = PATH_L / WALK_V + PAUSE_T;
+const actorState = { heading: 0, walk: 1 };
+
+// Floor mark at the pause spot (a tape "T")
+{
+  const mp = actorPath.getPointAt(PAUSE_U);
+  const tape = new THREE.MeshBasicMaterial({ color: 0xff8a1f });
+  const a = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.05), tape);
+  const b = new THREE.Mesh(new THREE.PlaneGeometry(0.05, 0.3), tape);
+  for (const m of [a, b]) { m.rotation.x = -Math.PI / 2; m.position.set(mp.x, 0.004, mp.z); scene.add(m); }
+  b.position.z += 0.17;
+}
+
+const seated = makePerson({ skin: 0x8d5a3c, top: 0x3c6e8f, pants: 0x3a3a3a, hair: 0x111111 });
+seated.g.position.set(-13, 0, -6.65); seated.g.rotation.y = 0;
+seated.hips.position.y = 0.5;
+seated.legs.forEach(l => l.rotation.x = -Math.PI / 2 + 0.1);
+envOnly.add(seated.g);
+const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.03, 0.09, 12), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+cup.position.set(-13.1, 0.81, -6.1); envOnly.add(cup);
+
+function updateActors(t) {
+  const tt = ((t % T_TOTAL) + T_TOTAL) % T_TOTAL;
+  let dist, walking = true;
+  if (tt < T1) dist = tt * WALK_V;
+  else if (tt < T1 + PAUSE_T) { dist = PAUSE_U * PATH_L; walking = false; }
+  else dist = PAUSE_U * PATH_L + (tt - T1 - PAUSE_T) * WALK_V;
+  const u = (dist / PATH_L) % 1;
+  const pos = actorPath.getPointAt(u), tan = actorPath.getTangentAt(u);
+  let target = Math.atan2(tan.x, tan.z);
+  if (!walking) { // turn to look at the camera while on the mark
+    const cp = jibCam.getWorldPosition(new V3());
+    target = Math.atan2(cp.x - pos.x, cp.z - pos.z);
+  }
+  actorState.heading += wrapAngle(target - actorState.heading) * 0.12;
+  actorState.walk += ((walking ? 1 : 0) - actorState.walk) * 0.1;
+  const ph = dist / 0.72 * Math.PI, w = actorState.walk;
+  actor.g.position.set(pos.x, 0, pos.z);
+  actor.g.rotation.y = actorState.heading;
+  actor.legs[0].rotation.x = Math.sin(ph) * 0.45 * w;
+  actor.legs[1].rotation.x = -Math.sin(ph) * 0.45 * w;
+  actor.arms[0].rotation.x = -Math.sin(ph) * 0.38 * w;
+  actor.arms[1].rotation.x = Math.sin(ph) * 0.38 * w;
+  actor.hips.position.y = 0.93 + Math.abs(Math.cos(ph)) * 0.03 * w;
+  actor.headG.rotation.y = (1 - w) * Math.sin(t * 0.9) * 0.25;
+
+  // seated actor: idles and drinks
+  seated.headG.rotation.y = Math.sin(t * 0.31) * 0.5;
+  const sip = Math.max(0, Math.sin(t * 0.45)) ** 6;
+  seated.arms[1].rotation.x = -sip * 1.9;
+  seated.arms[0].rotation.x = -0.6;
+}
+
+// =====================================================================
+// The jib rig
+// =====================================================================
+const hiList = { arm: [], cw: [], column: [], joy: [], knob: [] };
+function hm(color, opts = {}) { return new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.4, metalness: 0.6 }, opts)); }
+function mesh(geo, mat, parent, x = 0, y = 0, z = 0, hiKey = null) {
+  const m = new THREE.Mesh(geo, hiKey ? mat.clone() : mat);
+  m.position.set(x, y, z); m.castShadow = true; m.receiveShadow = true;
+  parent.add(m);
+  if (hiKey) hiList[hiKey].push(m);
+  return m;
+}
+const mAlu = hm(0xc4c9cf, { roughness: 0.32, metalness: 0.75 });
+const mBlack = hm(0x1b1d21, { roughness: 0.5, metalness: 0.4 });
+const mOrange = hm(0xff7a1a, { roughness: 0.45, metalness: 0.2 });
+const mRubber = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 });
+const mWeight = hm(0x3a3e45, { roughness: 0.55, metalness: 0.5 });
+
+const rigG = new THREE.Group(); scene.add(rigG);
+
+// base (spider dolly)
+mesh(new THREE.CylinderGeometry(0.13, 0.15, 0.22, 20), mBlack, rigG, 0, 0.2, 0);
+for (let i = 0; i < 3; i++) {
+  const a = i * Math.PI * 2 / 3 + Math.PI / 6;
+  const leg = mesh(new THREE.BoxGeometry(0.62, 0.05, 0.07), mAlu, rigG, Math.cos(a) * 0.3, 0.16, Math.sin(a) * 0.3);
+  leg.rotation.y = -a;
+  const wy = mesh(new THREE.BoxGeometry(0.05, 0.1, 0.05), mBlack, rigG, Math.cos(a) * 0.6, 0.11, Math.sin(a) * 0.6);
+  const wh = mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.045, 16), mRubber, rigG, Math.cos(a) * 0.6, 0.065, Math.sin(a) * 0.6);
+  wh.rotation.z = Math.PI / 2; wh.rotation.y = -a;
+}
+const column = mesh(new THREE.CylinderGeometry(0.055, 0.055, 1, 16), mAlu, rigG, 0, 0.8, 0, 'column');
+const colCollar = mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.06, 16), mOrange, rigG, 0, 1.2, 0);
+
+// yaw head
+const yawG = new THREE.Group(); rigG.add(yawG);
+mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.08, 24), mBlack, yawG, 0, -0.12, 0);
+for (const z of [-0.15, 0.15]) mesh(new THREE.BoxGeometry(0.16, 0.2, 0.02), mBlack, yawG, 0, -0.04, z);
+
+// arm (pitches)
+const pitchG = new THREE.Group(); yawG.add(pitchG);
+{
+  const hub = mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.28, 20), mOrange, pitchG); hub.rotation.x = Math.PI / 2;
+  const front = mesh(new THREE.CylinderGeometry(0.03, 0.048, ARM_FRONT, 14), mAlu, pitchG, ARM_FRONT / 2, 0, 0, 'arm'); front.rotation.z = -Math.PI / 2;
+  const rear = mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.34, 14), mAlu, pitchG, -0.67, 0, 0, 'arm'); rear.rotation.z = Math.PI / 2;
+  const post = mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.3, 10), mAlu, pitchG, CROSS_X, CROSS_Y / 2, 0, 'arm');
+  const bar = mesh(new THREE.CylinderGeometry(0.016, 0.016, BAR_HALF * 2, 12), mAlu, pitchG, CROSS_X, CROSS_Y, 0, 'arm'); bar.rotation.x = Math.PI / 2;
+  // king post and stay cables
+  mesh(new THREE.CylinderGeometry(0.015, 0.02, 0.45, 8), mBlack, pitchG, 0, 0.26, 0);
+  const cablePts = [new V3(0, 0.48, 0), new V3(2.85, 0.02, 0), new V3(0, 0.48, 0), new V3(-1.2, 0.04, 0)];
+  const cables = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(cablePts), new THREE.LineBasicMaterial({ color: 0x222222 }));
+  pitchG.add(cables);
+  mesh(new THREE.BoxGeometry(0.1, 0.06, 0.1), mBlack, pitchG, ARM_FRONT, 0, 0);
+}
+// grip sleeves (left one twists for zoom)
+const gripL = new THREE.Group(); gripL.position.set(CROSS_X, CROSS_Y, -0.27); pitchG.add(gripL);
+const gripR = new THREE.Group(); gripR.position.set(CROSS_X, CROSS_Y, 0.27); pitchG.add(gripR);
+for (const g of [gripL, gripR]) {
+  const s = mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.12, 14), mRubber, g, 0, 0, 0, 'arm'); s.rotation.x = Math.PI / 2;
+  const cap = mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.012, 14), mOrange, g, 0, 0, g === gripL ? -0.066 : 0.066); cap.rotation.x = Math.PI / 2;
+}
+mesh(new THREE.BoxGeometry(0.008, 0.012, 0.1), mOrange, gripL, 0, 0.021, 0);   // twist indicator stripe
+
+// counterweight carriage
+const cwG = new THREE.Group(); pitchG.add(cwG);
+mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.2, 16), mBlack, cwG).rotation.z = Math.PI / 2;
+for (const dx of [-0.06, 0, 0.06]) mesh(new THREE.BoxGeometry(0.05, 0.28, 0.24), mWeight, cwG, dx, -0.05, 0, 'cw');
+
+// remote head (stays level, hangs from the arm tip)
+const levelHead = new THREE.Group(); yawG.add(levelHead);
+mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.1, 18), mBlack, levelHead, 0, -0.07, 0);
+const panG = new THREE.Group(); panG.position.y = -0.12; levelHead.add(panG);
+mesh(new THREE.BoxGeometry(0.08, 0.03, 0.16), mBlack, panG, 0, 0, -0.07);
+mesh(new THREE.BoxGeometry(0.08, 0.24, 0.03), mBlack, panG, 0, -0.11, -0.14);
+const tiltMotor = mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.05, 16), mOrange, panG, 0, -0.22, -0.12); tiltMotor.rotation.x = Math.PI / 2;
+const tiltG = new THREE.Group(); tiltG.position.y = -0.22; panG.add(tiltG);
+mesh(new THREE.BoxGeometry(0.26, 0.15, 0.11), mBlack, tiltG, 0, 0, 0);
+mesh(new THREE.BoxGeometry(0.16, 0.03, 0.03), mBlack, tiltG, 0, 0.1, 0);
+const lens = mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.2, 20), mBlack, tiltG, 0.23, 0, 0); lens.rotation.z = -Math.PI / 2;
+mesh(new THREE.BoxGeometry(0.05, 0.13, 0.17), mBlack, tiltG, 0.36, 0, 0);
+const tally = new THREE.Mesh(new THREE.SphereGeometry(0.01, 8, 6), new THREE.MeshStandardMaterial({ color: 0x330000, emissive: 0x000000 }));
+tally.position.set(0.1, 0.06, 0.056); tiltG.add(tally);
+const jibCam = new THREE.PerspectiveCamera(30, RT_W / RT_H, 0.03, 420);
+jibCam.position.set(0.395, 0, 0); jibCam.rotation.y = -Math.PI / 2;
+tiltG.add(jibCam);
+
+// =====================================================================
+// Monitor feed: render target + depth of field
+// =====================================================================
+const depthTex = new THREE.DepthTexture(RT_W, RT_H);
+const rtScene = new THREE.WebGLRenderTarget(RT_W, RT_H, { type: THREE.HalfFloatType, depthTexture: depthTex, depthBuffer: true });
+const rtFinal = new THREE.WebGLRenderTarget(RT_W, RT_H, { type: THREE.HalfFloatType, depthBuffer: false });
+const dofMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tColor: { value: rtScene.texture }, tDepth: { value: depthTex },
+    near: { value: jibCam.near }, far: { value: jibCam.far },
+    focusDist: { value: 5 }, cocScale: { value: 1 }, texel: { value: new THREE.Vector2(1 / RT_W, 1 / RT_H) }
+  },
+  depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    #include <packing>
+    uniform sampler2D tColor; uniform sampler2D tDepth;
+    uniform float near; uniform float far; uniform float focusDist; uniform float cocScale; uniform vec2 texel;
+    varying vec2 vUv;
+    float linDepth(vec2 uv){ float d = texture2D(tDepth, uv).x; return -perspectiveDepthToViewZ(d, near, far); }
+    float coc(float D){ return clamp(cocScale * abs(D - focusDist) / max(D, 0.001), 0.0, 14.0); }
+    void main(){
+      float Dc = linDepth(vUv);
+      float cc = coc(Dc);
+      vec3 col = texture2D(tColor, vUv).rgb;
+      if (cc > 0.6) {
+        vec3 acc = col; float ws = 1.0;
+        for (int i = 0; i < 28; i++) {
+          float fi = float(i);
+          float r = sqrt((fi + 0.5) / 28.0);
+          float a = fi * 2.39996;
+          vec2 o = vec2(cos(a), sin(a)) * r * cc * texel;
+          float Ds = linDepth(vUv + o);
+          float cs = coc(Ds);
+          float w = Ds < Dc ? clamp(cs / cc, 0.0, 1.0) : 1.0;
+          acc += texture2D(tColor, vUv + o).rgb * w; ws += w;
+        }
+        col = acc / ws;
+      }
+      vec2 q = vUv - 0.5;
+      col *= 1.0 - dot(q, q) * 0.55;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+const dofScene = new THREE.Scene();
+const dofQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), dofMat); dofQuad.frustumCulled = false;
+dofScene.add(dofQuad);
+const dofCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// Overlay (guides, timecode, lens data)
+const ovCanvas = document.createElement('canvas'); ovCanvas.width = 768; ovCanvas.height = 432;
+const ovCtx = ovCanvas.getContext('2d');
+const ovTex = new THREE.CanvasTexture(ovCanvas); ovTex.colorSpace = THREE.SRGBColorSpace;
+const feedMat = new THREE.MeshBasicMaterial({ map: rtFinal.texture });
+const ovMat = new THREE.MeshBasicMaterial({ map: ovTex, transparent: true, toneMapped: false, depthWrite: false });
+const feedMeshes = [];
+
+// rig-mounted monitor (level, faces the operator)
+const monG = new THREE.Group(); yawG.add(monG);
+mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.14, 8), mBlack, monG, 0, 0.07, 0);
+const monInner = new THREE.Group(); monInner.position.y = 0.26; monInner.rotation.z = -0.18; monG.add(monInner);
+mesh(new THREE.BoxGeometry(0.035, 0.31, 0.52), mBlack, monInner, 0.004, 0, 0);
+{
+  const scr = new THREE.Mesh(new THREE.PlaneGeometry(0.48, 0.27), feedMat); scr.rotation.y = -Math.PI / 2; scr.position.x = -0.0145; monInner.add(scr);
+  const ov = new THREE.Mesh(new THREE.PlaneGeometry(0.48, 0.27), ovMat); ov.rotation.y = -Math.PI / 2; ov.position.x = -0.0155; monInner.add(ov);
+  feedMeshes.push(scr, ov);
+  mesh(new THREE.BoxGeometry(0.03, 0.03, 0.52), mBlack, monInner, -0.03, 0.17, 0).rotation.z = 0.5; // sun hood
+}
+
+// Video village: big monitor on a stand + instructions placard
+const village = new THREE.Group(); village.position.set(-2.3, 0, 5.5); village.rotation.y = 1.42; scene.add(village);
+mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.3, 10), mBlack, village, 0, 0.65, 0);
+for (let i = 0; i < 3; i++) { const a = i * 2.094; const l = mesh(new THREE.BoxGeometry(0.5, 0.025, 0.03), mBlack, village, Math.cos(a) * 0.22, 0.02, Math.sin(a) * 0.22); l.rotation.y = -a; }
+mesh(new THREE.BoxGeometry(1.26, 0.74, 0.05), mBlack, village, 0, 1.62, -0.03);
+{
+  const scr = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.675), feedMat); scr.position.set(0, 1.62, 0.0); village.add(scr);
+  const ov = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.675), ovMat); ov.position.set(0, 1.62, 0.001); village.add(ov);
+  feedMeshes.push(scr, ov);
+}
+const placardTex = canvasTex(1024, 640, (g, w, h) => {
+  g.fillStyle = '#14171d'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#ff7a1a'; g.fillRect(0, 0, w, 10);
+  g.fillStyle = '#ffffff'; g.font = 'bold 54px system-ui, sans-serif'; g.fillText('HOW TO OPERATE', 40, 84);
+  g.font = '32px system-ui, sans-serif'; g.fillStyle = '#d6dbe3';
+  const lines = [
+    '✊  Make a fist around a part to grab it',
+    '↔  Handlebar: push / pull / lift to swing & boom',
+    '🔄  Left grip: twist like a throttle to ZOOM',
+    '🕹  Joystick (right of box): PAN / TILT',
+    '◎  Knob (left of box): FOCUS  ·  AF = auto',
+    '⚖  Slide the counterweights to balance',
+    '🛞  Grab the column to roll the dolly',
+    '☝  Poke buttons: REC · PLAY · AF · GUIDE · DRAG · FIT',
+    '🎮  Controllers: grip = grab, sticks = head/lens'
+  ];
+  lines.forEach((l, i) => g.fillText(l, 40, 150 + i * 54));
+});
+const placard = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.5), new THREE.MeshBasicMaterial({ map: placardTex, toneMapped: false }));
+placard.position.set(0, 0.95, 0.035); placard.rotation.x = -0.35; village.add(placard);
+
+// =====================================================================
+// Control box (level, mounted behind the handlebar)
+// =====================================================================
+const boxG = new THREE.Group(); yawG.add(boxG);
+mesh(new THREE.BoxGeometry(0.14, 0.05, 0.30), hm(0x2a2d33, { roughness: 0.6, metalness: 0.3 }), boxG);
+mesh(new THREE.BoxGeometry(0.03, 0.03, 0.08), mBlack, boxG, 0.085, 0, 0);
+// joystick
+const JOY_BASE = new V3(0.02, 0.03, 0.07);
+const JOY_BALL = new V3(0.02, 0.03 + 0.065, 0.07);
+mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.012, 16), mRubber, boxG, JOY_BASE.x, 0.03, JOY_BASE.z);
+const joyG = new THREE.Group(); joyG.position.copy(JOY_BASE); boxG.add(joyG);
+mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.06, 8), mAlu, joyG, 0, 0.03, 0);
+mesh(new THREE.SphereGeometry(0.02, 16, 12), mOrange, joyG, 0, 0.065, 0, 'joy');
+// focus knob
+const KNOB = new V3(0.02, 0.04, -0.075);
+const knobG = new THREE.Group(); knobG.position.set(KNOB.x, 0.025, KNOB.z); boxG.add(knobG);
+mesh(new THREE.CylinderGeometry(0.036, 0.036, 0.026, 28), hm(0xd8dbe0, { roughness: 0.35, metalness: 0.7 }), knobG, 0, 0.013, 0, 'knob');
+mesh(new THREE.BoxGeometry(0.03, 0.004, 0.005), mOrange, knobG, 0.012, 0.027, 0);
+for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; mesh(new THREE.BoxGeometry(0.004, 0.022, 0.004), mBlack, knobG, Math.cos(a) * 0.037, 0.013, Math.sin(a) * 0.037); }
+
+// buttons
+const KEY_TOP = 0.037;
+function labelTex(text, color) {
+  return canvasTex(128, 128, (g, w, h) => {
+    g.fillStyle = color; g.fillRect(0, 0, w, h);
+    g.fillStyle = '#ffffff'; g.font = `bold ${text.length > 4 ? 30 : 38}px system-ui, sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, w / 2, h / 2 + 2);
+  });
+}
+const buttons = ['REC', 'PLAY', 'AF', 'GUIDE', 'DRAG', 'FIT'].map((name, i) => {
+  const z = -0.1125 + i * 0.045, x = -0.045;
+  const g = new THREE.Group(); g.position.set(x, 0, z); boxG.add(g);
+  const col = name === 'REC' ? '#b3261e' : name === 'PLAY' ? '#2e7d32' : '#3a404c';
+  const cap = mesh(new THREE.BoxGeometry(0.032, 0.012, 0.036), hm(0x3a404c, { roughness: 0.6, metalness: 0.1 }), g, 0, 0.031, 0);
+  const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 0.03), new THREE.MeshBasicMaterial({ map: labelTex(name, col), toneMapped: false }));
+  lab.rotation.set(-Math.PI / 2, -Math.PI / 2, 0, 'YXZ'); lab.position.y = 0.0375; g.add(lab);
+  return { name, x, z, g, cap, lab, depress: 0, lastFire: 0 };
+});
+
+// status LCD
+const lcdCanvas = document.createElement('canvas'); lcdCanvas.width = 512; lcdCanvas.height = 118;
+const lcdCtx = lcdCanvas.getContext('2d');
+const lcdTex = new THREE.CanvasTexture(lcdCanvas); lcdTex.colorSpace = THREE.SRGBColorSpace;
+const lcd = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.06), new THREE.MeshBasicMaterial({ map: lcdTex, toneMapped: false }));
+const lcdHolder = new THREE.Group(); lcdHolder.position.set(0.072, 0.06, 0); lcdHolder.rotation.z = -0.3; boxG.add(lcdHolder);
+lcd.rotation.y = -Math.PI / 2; lcd.position.x = -0.004; lcdHolder.add(lcd);
+mesh(new THREE.BoxGeometry(0.006, 0.07, 0.28), mBlack, lcdHolder, 0, 0, 0);
+
+// =====================================================================
+// Rig pose -> visuals
+// =====================================================================
+function setLevel(obj, x, y) {
+  const c = Math.cos(P.pitch), s = Math.sin(P.pitch);
+  obj.position.set(x * c - y * s, x * s + y * c, 0);
+}
+function updateRigVisual() {
+  rigG.position.set(P.base.x, 0, P.base.z);
+  yawG.position.y = P.pivotH; yawG.rotation.y = P.yaw;
+  pitchG.rotation.z = P.pitch;
+  const colLen = P.pivotH - 0.3 - 0.16;
+  column.scale.y = colLen; column.position.y = 0.3 + colLen / 2;
+  colCollar.position.y = 0.3 + colLen;
+  cwG.position.x = -P.cwD;
+  setLevel(levelHead, ARM_FRONT, 0);
+  setLevel(boxG, BOX_ANCHOR[0], BOX_ANCHOR[1]);
+  setLevel(monG, MON_ANCHOR[0], MON_ANCHOR[1]);
+  panG.rotation.y = H.pan; tiltG.rotation.z = H.tilt;
+  joyG.rotation.set(UI.joyX * 0.4, 0, -UI.joyY * 0.4);
+  knobG.rotation.y = UI.knobRot;
+  gripL.rotation.z = UI.gripTwist;
+  rigG.updateMatrixWorld(true);
+}
+function updateLens() {
+  const f = Math.exp(H.logF);
+  jibCam.fov = THREE.MathUtils.radToDeg(2 * Math.atan(SENSOR_H / 2 / f));
+  jibCam.updateProjectionMatrix();
+  const S = dFromU(H.focusU);
+  dofMat.uniforms.focusDist.value = S;
+  dofMat.uniforms.cocScale.value = (f * f / (T_STOP * Math.max(S * 1000 - f, 1))) / SENSOR_H * RT_H;
+}
+
+// =====================================================================
+// Physics
+// =====================================================================
+function massProps() {
+  const c = Math.cos(P.pitch), s = Math.sin(P.pitch);
+  let mx = 0, my = 0, Ip = 4, Iy = 5;
+  const add = (x, y, m) => { mx += m * x; my += m * y; Ip += m * (x * x + y * y); const hx = x * c - y * s; Iy += m * hx * hx; };
+  for (const [x, y, m] of FIXED_MASSES) add(x, y, m);
+  add(-P.cwD, 0, CW_MASS);
+  return { Ip, Iy, gTorque: -9.81 * (mx * c - my * s), imbalance: mx };
+}
+function armPointWorld(l, out) {
+  const c = Math.cos(P.pitch), s = Math.sin(P.pitch);
+  const x1 = l.x * c - l.y * s, y1 = l.x * s + l.y * c, z1 = l.z;
+  const cy = Math.cos(P.yaw), sy = Math.sin(P.yaw);
+  return out.set(P.base.x + x1 * cy + z1 * sy, P.pivotH + y1, P.base.z - x1 * sy + z1 * cy);
+}
+const _p = new V3(), _r = new V3(), _w = new V3(), _vp = new V3(), _f = new V3(), _tau = new V3(), _t = new V3();
+let stopFlash = 0;
+function hitStop(w) {
+  stopFlash = 1;
+  for (const s of slots) if (s.grab && s.grab.type === 'arm' && s.gp && s.gp.hapticActuators && s.gp.hapticActuators[0]) {
+    try { s.gp.hapticActuators[0].pulse(Math.min(1, Math.abs(w) * 1.5 + 0.3), 60); } catch (e) {}
+  }
+}
+function physicsStep(h, ext) {
+  const mp = massProps();
+  let ty = ext.ty, tp = ext.tp + mp.gTorque;
+  const ax = Math.sin(P.yaw), az = Math.cos(P.yaw);  // pitch axis (world)
+  let held = ext.active;
+  // hands on the arm: spring-damper coupling between hand and the grabbed point
+  for (const s of slots) {
+    const g = s.grab; if (!g || g.type !== 'arm') continue;
+    held = true;
+    armPointWorld(g.local, _p);
+    _r.set(_p.x - P.base.x, _p.y - P.pivotH, _p.z - P.base.z);
+    _w.set(ax * P.wp, P.wy, az * P.wp);
+    _vp.crossVectors(_w, _r);
+    _f.copy(s.pos).sub(g.offset).sub(_p).multiplyScalar(K_HAND);
+    _f.addScaledVector(_t.copy(s.vel).sub(_vp), C_HAND);
+    if (_f.length() > F_MAX_HAND) _f.setLength(F_MAX_HAND);
+    _tau.crossVectors(_r, _f);
+    ty += _tau.y; tp += _tau.x * ax + _tau.z * az;
+  }
+  const b = DRAGS[P.drag].b;
+  ty -= b * P.wy; tp -= b * P.wp;
+  if (!held) {
+    if (Math.abs(P.wy) < 0.02 && Math.abs(ty) < T_STATIC) { P.wy = 0; ty = 0; }
+    if (Math.abs(P.wp) < 0.02 && Math.abs(tp) < T_STATIC) { P.wp = 0; tp = 0; }
+  }
+  P.wy += ty / mp.Iy * h; P.wp += tp / mp.Ip * h;
+  P.yaw += P.wy * h; P.pitch += P.wp * h;
+  if (P.pitch > PITCH_MAX) { P.pitch = PITCH_MAX; if (P.wp > 0) { if (P.wp > 0.15) hitStop(P.wp); P.wp *= -0.2; } }
+  if (P.pitch < PITCH_MIN) { P.pitch = PITCH_MIN; if (P.wp < 0) { if (P.wp < -0.15) hitStop(P.wp); P.wp *= -0.2; } }
+
+  // dolly
+  let bHeld = false; _f.set(0, 0, 0);
+  for (const s of slots) {
+    const g = s.grab; if (!g || g.type !== 'column') continue;
+    bHeld = true;
+    _p.set(P.base.x + g.local.x, g.local.y, P.base.z + g.local.z);
+    _t.copy(s.pos).sub(g.offset).sub(_p).multiplyScalar(1500);
+    _t.x += (s.vel.x - P.baseVel.x) * 700; _t.z += (s.vel.z - P.baseVel.z) * 700; _t.y = 0;
+    if (_t.length() > 500) _t.setLength(500);
+    _f.add(_t);
+  }
+  P.baseVel.addScaledVector(_f, h / 90);
+  P.baseVel.multiplyScalar(Math.exp(-1.6 * h));
+  if (!bHeld && P.baseVel.length() < 0.03) P.baseVel.set(0, 0, 0);
+  P.base.addScaledVector(P.baseVel, h);
+
+  // counterweight slide
+  for (const s of slots) if (s.grab && s.grab.type === 'cw') P.cwD += (s.grab.target - P.cwD) * (1 - Math.exp(-h * 14));
+}
+
+// =====================================================================
+// XR input: hands and controllers
+// =====================================================================
+const handFactory = new XRHandModelFactory();
+const ctrlFactory = new XRControllerModelFactory();
+const slots = [0, 1].map(i => {
+  const hand = renderer.xr.getHand(i); scene.add(hand);
+  hand.add(handFactory.createHandModel(hand, 'mesh'));
+  const grip = renderer.xr.getControllerGrip(i); scene.add(grip);
+  grip.add(ctrlFactory.createControllerModel(grip));
+  const ctrl = renderer.xr.getController(i); scene.add(ctrl);
+  const s = { i, hand, grip, ctrl, source: null, kind: null, handed: 'none', gp: null,
+    pos: new V3(), prev: new V3(), vel: new V3(), quat: new THREE.Quaternion(), tip: new V3(),
+    valid: false, wasValid: false, gripping: false, grab: null, hover: null, prevBtn: [], pokeIn: new Set() };
+  ctrl.addEventListener('connected', e => {
+    s.source = e.data; s.kind = e.data.hand ? 'hand' : 'ctrl'; s.handed = e.data.handedness; s.gp = e.data.gamepad || null;
+    grip.visible = s.kind === 'ctrl';
+  });
+  ctrl.addEventListener('disconnected', () => { s.grab = null; s.source = null; s.kind = null; s.valid = false; s.gripping = false; });
+  return s;
+});
+const HAND_TIPS = ['index-finger-tip', 'middle-finger-tip', 'ring-finger-tip'];
+const _fwd = new V3();
+function readSlot(s, dt) {
+  s.valid = false;
+  if (!s.source) return;
+  if (s.kind === 'hand') {
+    const j = s.hand.joints;
+    const w = j['wrist'], kn = j['middle-finger-phalanx-proximal'], mi = j['middle-finger-phalanx-intermediate'],
+      mc = j['middle-finger-metacarpal'], it = j['index-finger-tip'];
+    if (!w || !kn || !mi || !mc || !it || !w.visible) { s.gripping = false; return; }
+    for (const n of HAND_TIPS) if (!j[n]) return;
+    s.pos.copy(kn.position).multiplyScalar(0.5).addScaledVector(mi.position, 0.25).addScaledVector(mc.position, 0.25);
+    s.quat.copy(w.quaternion);
+    const palm = Math.max(0.04, w.position.distanceTo(kn.position));
+    let curl = 0; for (const n of HAND_TIPS) curl += j[n].position.distanceTo(w.position);
+    curl /= 3 * palm;
+    if (s.gripping) { if (curl > 1.5) s.gripping = false; } else if (curl < 1.22) s.gripping = true;
+    s.tip.copy(it.position);
+    s.valid = true;
+  } else {
+    if (!s.grip.visible && !s.ctrl.visible) return;
+    s.pos.copy(s.grip.position); s.quat.copy(s.grip.quaternion);
+    s.gp = s.source.gamepad || s.gp;
+    const sq = s.gp && s.gp.buttons[1] ? s.gp.buttons[1].value : 0;
+    if (s.gripping) { if (sq < 0.35) s.gripping = false; } else if (sq > 0.6) s.gripping = true;
+    _fwd.set(0, -0.02, -0.06).applyQuaternion(s.quat);
+    s.tip.copy(s.pos).add(_fwd);
+    s.valid = true;
+  }
+  if (s.valid && s.wasValid && dt > 0) {
+    _t.copy(s.pos).sub(s.prev).divideScalar(dt);
+    if (_t.length() < 8) s.vel.lerp(_t, 0.45);
+  } else s.vel.set(0, 0, 0);
+  s.prev.copy(s.pos);
+}
+
+// --- grab targets
+const _a = new V3(), _b = new V3(), _c = new V3();
+const SEGMENTS = [ // in arm coordinates
+  [new V3(CROSS_X, CROSS_Y, -BAR_HALF), new V3(CROSS_X, CROSS_Y, BAR_HALF), 'bar'],
+  [new V3(CROSS_X, 0, 0), new V3(CROSS_X, CROSS_Y, 0), 'post'],
+  [new V3(-0.12, 0, 0), new V3(-0.5, 0, 0), 'tube'],
+  [new V3(0.15, 0, 0), new V3(ARM_FRONT, 0, 0), 'tube']
+];
+function closestOnSeg(p, A, B, out) {
+  _c.copy(B).sub(A); const t = clamp(_a.copy(p).sub(A).dot(_c) / _c.lengthSq(), 0, 1);
+  return out.copy(A).addScaledVector(_c, t);
+}
+function handRoll(s) { // roll of the back of the hand around the handlebar axis (level frame)
+  const v = _a.set(0, 1, 0).applyQuaternion(s.quat);
+  const c = Math.cos(-P.yaw), sn = Math.sin(-P.yaw);
+  return Math.atan2(v.y, v.x * c + v.z * sn);
+}
+function handYaw(s, axis) { // heading of a hand axis in the box (level) frame
+  const v = axis === 0 ? _a.set(0, 0, -1) : _a.set(1, 0, 0);
+  v.applyQuaternion(s.quat);
+  const c = Math.cos(-P.yaw), sn = Math.sin(-P.yaw);
+  const x = v.x * c + v.z * sn, z = -v.x * sn + v.z * c;
+  return { ang: Math.atan2(-z, x), mag: Math.hypot(x, z) };
+}
+function findTarget(s, pos) {
+  let best = null, bd = Infinity;
+  const consider = (d, bias, make) => { if (d - bias < bd) { bd = d - bias; best = make; } };
+  const lb = boxG.worldToLocal(_b.copy(pos));
+  const dj = lb.distanceTo(JOY_BALL);
+  if (dj < 0.075) { const st = lb.clone(); consider(dj, 0.04, () => ({ type: 'joy', start: st })); }
+  const dk = lb.distanceTo(KNOB);
+  if (dk < 0.08) consider(dk, 0.04, () => {
+    const f = handYaw(s, 0), x = handYaw(s, 1);
+    const axis = f.mag > x.mag ? 0 : 1;
+    return { type: 'knob', axis, last: handYaw(s, axis).ang };
+  });
+  const lp = pitchG.worldToLocal(_b.copy(pos));
+  // counterweight
+  const cwc = _c.set(-P.cwD, -0.05, 0);
+  const dcw = Math.max(0, Math.abs(lp.x - cwc.x) - 0.09) + Math.max(0, Math.abs(lp.y - cwc.y) - 0.13) + Math.max(0, Math.abs(lp.z) - 0.12);
+  if (dcw < 0.08) { const sx = lp.x, sd = P.cwD; consider(dcw, 0.03, () => ({ type: 'cw', startX: sx, startD: sd, target: sd })); }
+  for (const [A, B, kind] of SEGMENTS) {
+    const q = closestOnSeg(lp, A, B, new V3());
+    const d = q.distanceTo(lp);
+    if (d < 0.1) consider(d, 0, () => {
+      const offset = new V3().copy(pos).sub(armPointWorld(q, new V3()));
+      const twist = kind === 'bar' && q.z < -0.18;
+      return { type: 'arm', local: q, offset, twist, rollStart: twist ? handRoll(s) : 0 };
+    });
+  }
+  // column
+  const cl = new V3(pos.x - P.base.x, pos.y, pos.z - P.base.z);
+  const q2 = closestOnSeg(cl, new V3(0, 0.35, 0), new V3(0, P.pivotH - 0.2, 0), new V3());
+  const dc = q2.distanceTo(cl);
+  if (dc < 0.1) consider(dc, 0, () => ({ type: 'column', local: q2, offset: new V3().copy(pos).sub(new V3(P.base.x + q2.x, q2.y, P.base.z + q2.z)) }));
+  return best;
+}
+
+// =====================================================================
+// Buttons, recording, playback
+// =====================================================================
+let rec = null, play = null, needFit = false;
+const takes = [];
+function toggleRec() {
+  if (play) play = null;
+  if (rec) { if (rec.frames.length > 10) takes.push(rec); rec = null; }
+  else { actorClock = 0; rec = { frames: [], t: 0, n: takes.length + 1 }; }
+}
+function togglePlay() {
+  if (rec) return;
+  if (play) { play = null; return; }
+  if (!takes.length) return;
+  play = { take: takes[takes.length - 1], t: 0, i: 0 };
+}
+function pressButton(name) {
+  if (name === 'REC') toggleRec();
+  else if (name === 'PLAY') togglePlay();
+  else if (name === 'AF') H.af = !H.af;
+  else if (name === 'GUIDE') H.guides = !H.guides;
+  else if (name === 'DRAG') P.drag = (P.drag + 1) % DRAGS.length;
+  else if (name === 'FIT') { needFit = true; P.wy = P.wp = 0; }
+}
+function sampleTake(take, t) {
+  const f = take.frames;
+  let i = play.i; while (i < f.length - 2 && f[i + 1].t < t) i++;
+  play.i = i;
+  const a = f[i], b = f[Math.min(i + 1, f.length - 1)];
+  const k = b.t > a.t ? clamp((t - a.t) / (b.t - a.t), 0, 1) : 0;
+  const o = {}; for (const key in a) o[key] = a[key] + (b[key] - a[key]) * k;
+  return o;
+}
+const saved = {};
+function applySnap(o) {
+  P.base.x = o.bx; P.base.z = o.bz; P.yaw = o.yaw; P.pitch = o.pitch; P.pivotH = o.ph;
+  H.pan = o.pan; H.tilt = o.tilt; H.logF = o.logF; H.focusU = o.focusU;
+}
+function snap() {
+  return { t: 0, bx: P.base.x, bz: P.base.z, yaw: P.yaw, pitch: P.pitch, ph: P.pivotH,
+    pan: H.pan, tilt: H.tilt, logF: H.logF, focusU: H.focusU, at: actorClock };
+}
+
+// =====================================================================
+// Overlay + LCD drawing
+// =====================================================================
+function tc(t) {
+  const fr = Math.floor(t * 24), ff = fr % 24, s = Math.floor(fr / 24);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(Math.floor(s / 3600))}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}:${p(ff)}`;
+}
+function focusStr(u) { const d = dFromU(u); return u > 0.985 ? '∞' : d < 10 ? d.toFixed(1) + 'm' : Math.round(d) + 'm'; }
+function drawOverlay(now) {
+  const g = ovCtx, w = 768, h = 432;
+  g.clearRect(0, 0, w, h);
+  if (H.guides) {
+    g.strokeStyle = 'rgba(255,255,255,0.32)'; g.lineWidth = 1.5;
+    g.beginPath();
+    for (const k of [1, 2]) { g.moveTo(w * k / 3, 0); g.lineTo(w * k / 3, h); g.moveTo(0, h * k / 3); g.lineTo(w, h * k / 3); }
+    g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,0.55)'; g.strokeRect(w * 0.05, h * 0.05, w * 0.9, h * 0.9);
+    g.beginPath(); g.moveTo(w / 2 - 14, h / 2); g.lineTo(w / 2 + 14, h / 2); g.moveTo(w / 2, h / 2 - 14); g.lineTo(w / 2, h / 2 + 14); g.stroke();
+  }
+  g.fillStyle = 'rgba(0,0,0,0.45)'; g.fillRect(0, 0, w, 40); g.fillRect(0, h - 40, w, 40);
+  g.font = 'bold 22px ui-monospace, Menlo, Consolas, monospace'; g.textBaseline = 'middle';
+  if (rec) {
+    if (Math.floor(now * 2) % 2 === 0) { g.fillStyle = '#ff2d2d'; g.beginPath(); g.arc(22, 20, 9, 0, Math.PI * 2); g.fill(); }
+    g.fillStyle = '#ff5a5a'; g.fillText(`REC  TAKE ${rec.n}`, 40, 20);
+    g.fillStyle = '#fff'; g.fillText(tc(rec.t), w - 170, 20);
+  } else if (play) {
+    g.fillStyle = '#5ee36a'; g.fillText(`▶ PLAYBACK  TAKE ${play.take.n}`, 14, 20);
+    g.fillStyle = '#fff'; g.fillText(tc(play.t), w - 170, 20);
+  } else {
+    g.fillStyle = '#d0d4da'; g.fillText('STBY', 14, 20);
+    g.fillText(`TAKES ${takes.length}`, w - 130, 20);
+  }
+  const f = Math.round(Math.exp(H.logF));
+  g.fillStyle = '#fff';
+  g.fillText(`${f}mm   T${T_STOP}   ⟂ ${focusStr(H.focusU)}${H.af ? '  AF' : ''}`, 14, h - 20);
+  // zoom bar
+  const zu = (H.logF - Math.log(F_MIN)) / Math.log(F_MAX / F_MIN);
+  g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(w - 214, h - 26, 200, 12);
+  g.fillStyle = '#ffb35c'; g.fillRect(w - 214, h - 26, 200 * zu, 12);
+  ovTex.needsUpdate = true;
+}
+function drawLCD() {
+  const g = lcdCtx, w = 512, h = 118;
+  g.fillStyle = '#0b1a12'; g.fillRect(0, 0, w, h);
+  g.font = 'bold 26px ui-monospace, Menlo, Consolas, monospace'; g.textBaseline = 'middle';
+  const imb = massProps().imbalance; // + = front heavy
+  g.fillStyle = '#7dffa8';
+  const label = Math.abs(imb) < 0.15 ? 'BALANCED' : imb > 0 ? 'FRONT HEAVY' : 'REAR HEAVY';
+  g.fillText(`BAL ${label}`, 12, 22);
+  g.strokeStyle = '#7dffa8'; g.lineWidth = 2; g.strokeRect(300, 10, 200, 24);
+  g.fillRect(399, 8, 2, 28);
+  const bx = clamp(imb / 4, -1, 1) * 98;
+  g.fillStyle = Math.abs(imb) < 0.15 ? '#7dffa8' : '#ffd166';
+  g.fillRect(400 + Math.min(0, bx), 14, Math.max(3, Math.abs(bx)), 16);
+  g.fillStyle = '#7dffa8';
+  g.fillText(`DRAG ${DRAGS[P.drag].n}   AF ${H.af ? 'ON ' : 'OFF'}   TAKES ${takes.length}`, 12, 60);
+  const st = rec ? `● REC ${tc(rec.t)}` : play ? `▶ PLAY ${tc(play.t)}` : 'STANDBY';
+  g.fillStyle = rec ? '#ff6b6b' : '#7dffa8';
+  g.fillText(`${st}`, 12, 96);
+  g.fillStyle = '#7dffa8';
+  g.fillText(`${Math.round(Math.exp(H.logF))}mm ${focusStr(H.focusU)}`, 330, 96);
+  lcdTex.needsUpdate = true;
+}
+
+// =====================================================================
+// Desktop controls
+// =====================================================================
+const keys = new Set();
+addEventListener('keydown', e => {
+  if (e.repeat) return;
+  keys.add(e.code);
+  const map = { KeyR: 'REC', KeyP: 'PLAY', KeyF: 'AF', KeyG: 'GUIDE', KeyT: 'DRAG' };
+  if (map[e.code]) pressButton(map[e.code]);
+  if (e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+const look = { yaw: 0, pitch: -0.2, drag: false, lx: 0, ly: 0 };
+renderer.domElement.addEventListener('pointerdown', e => { look.drag = true; look.lx = e.clientX; look.ly = e.clientY; });
+addEventListener('pointerup', () => look.drag = false);
+addEventListener('pointermove', e => {
+  if (!look.drag) return;
+  look.yaw -= (e.clientX - look.lx) * 0.004; look.pitch = clamp(look.pitch - (e.clientY - look.ly) * 0.004, -1.2, 1.2);
+  look.lx = e.clientX; look.ly = e.clientY;
+});
+const padPrev = [];
+const deskCamPos = new V3(0, 1.65, 6);
+function desktopInput(dt, inp) {
+  const k = c => keys.has(c) ? 1 : 0;
+  let sx = k('KeyA') - k('KeyD'), sy = k('KeyW') - k('KeyS');
+  inp.jx += k('ArrowRight') - k('ArrowLeft'); inp.jy += k('ArrowUp') - k('ArrowDown');
+  inp.zoom += k('KeyE') - k('KeyQ');
+  inp.focus += (k('KeyC') - k('KeyZ')) * dt * 0.25;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const gp of pads) {
+    if (!gp || gp.mapping !== 'standard') continue;
+    const dz = v => Math.abs(v) < 0.12 ? 0 : v;
+    sx += -dz(gp.axes[0]); sy += -dz(gp.axes[1]);
+    inp.jx += dz(gp.axes[2]); inp.jy += -dz(gp.axes[3]);
+    inp.zoom += (gp.buttons[7]?.value || 0) - (gp.buttons[6]?.value || 0);
+    inp.focus += ((gp.buttons[5]?.pressed ? 1 : 0) - (gp.buttons[4]?.pressed ? 1 : 0)) * dt * 0.25;
+    const prev = padPrev[gp.index] || [];
+    const edge = i => gp.buttons[i]?.pressed && !prev[i];
+    if (edge(0)) pressButton('REC'); if (edge(1)) pressButton('PLAY'); if (edge(2)) pressButton('AF'); if (edge(3)) pressButton('GUIDE');
+    padPrev[gp.index] = gp.buttons.map(b => b.pressed);
+  }
+  if (sx || sy) { inp.ext.ty += clamp(sx, -1, 1) * 140; inp.ext.tp += clamp(sy, -1, 1) * 140; inp.ext.active = true; }
+}
+function updateDesktopCamera(dt) {
+  const ad = new V3(Math.cos(P.yaw), 0, -Math.sin(P.yaw));
+  const target = new V3(P.base.x, 0, P.base.z).addScaledVector(ad, CROSS_X - 1.1);
+  target.y = P.pivotH + 0.45;
+  deskCamPos.lerp(target, damp(dt, 0.35));
+  camera.position.copy(deskCamPos);
+  const heading = Math.atan2(-ad.x, -ad.z) + look.yaw;
+  camera.rotation.set(look.pitch, heading, 0, 'YXZ');
+}
+const pipScene = new THREE.Scene();
+const pipCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); pipCam.position.z = 0.5;
+{
+  const a = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), feedMat); a.frustumCulled = false; pipScene.add(a);
+  const b = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), ovMat); b.frustumCulled = false; b.position.z = 0.1; pipScene.add(b);
+}
+
+// =====================================================================
+// XR session handling
+// =====================================================================
+let baseRefSpace = null;
+const btnVR = document.getElementById('btnVR'), btnMR = document.getElementById('btnMR'), xrMsg = document.getElementById('xrMsg');
+async function initButtons() {
+  if (!('xr' in navigator)) {
+    xrMsg.textContent = window.isSecureContext ? 'WebXR is not available in this browser. Open this page in the Meta Quest Browser.' :
+      'This page needs an https:// address for VR. GitHub Pages gives you one.';
+    return;
+  }
+  const vr = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
+  const ar = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  btnVR.disabled = !vr; btnMR.disabled = !ar;
+  xrMsg.textContent = vr ? 'Ready. Put the controllers down any time to switch to your hands.' : 'VR is not supported on this device. You can still test with keyboard or gamepad.';
+}
+initButtons();
+async function startXR(mode) {
+  try {
+    const session = await navigator.xr.requestSession(mode, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
+    isAR = mode === 'immersive-ar';
+    session.addEventListener('end', () => { isAR = false; baseRefSpace = null; applyMode(); renderer.setClearColor(0x000000, 1); });
+    await renderer.xr.setSession(session);
+    baseRefSpace = renderer.xr.getReferenceSpace();
+    needFit = true;
+    applyMode();
+  } catch (e) { xrMsg.textContent = 'Could not start: ' + e.message; }
+}
+btnVR.onclick = () => startXR('immersive-vr');
+btnMR.onclick = () => startXR('immersive-ar');
+function applyMode() {
+  envOnly.visible = !isAR; arShadow.visible = isAR;
+  renderer.setClearColor(0x000000, isAR ? 0 : 1);
+}
+const _q = new THREE.Quaternion();
+function doFit(frame) {
+  if (!baseRefSpace || !frame) return false;
+  const pose = frame.getViewerPose(baseRefSpace); if (!pose) return false;
+  const p = pose.transform.position, o = pose.transform.orientation;
+  _q.set(o.x, o.y, o.z, o.w);
+  const f = new V3(0, 0, -1).applyQuaternion(_q);
+  const aLocal = Math.atan2(-f.x, -f.z);
+  P.pivotH = clamp(p.y - 0.3, 1.0, 1.6);
+  const ad = new V3(Math.cos(P.yaw), 0, -Math.sin(P.yaw));
+  const W = new V3(P.base.x, 0, P.base.z).addScaledVector(ad, CROSS_X - 0.48);
+  const aWorld = Math.atan2(-ad.x, -ad.z);
+  const dy = aWorld - aLocal;
+  const cl = Math.cos(dy), sl = Math.sin(dy);
+  const rx = p.x * cl + p.z * sl, rz = -p.x * sl + p.z * cl;
+  const M = new THREE.Matrix4().makeRotationY(dy).setPosition(W.x - rx, 0, W.z - rz);
+  const inv = M.clone().invert();
+  const pos = new V3(), quat = new THREE.Quaternion(), sc = new V3();
+  inv.decompose(pos, quat, sc);
+  const off = baseRefSpace.getOffsetReferenceSpace(new XRRigidTransform(
+    { x: pos.x, y: pos.y, z: pos.z, w: 1 }, { x: quat.x, y: quat.y, z: quat.z, w: quat.w }));
+  renderer.xr.setReferenceSpace(off);
+  for (const s of slots) { s.grab = null; s.wasValid = false; }
+  return true;
+}
+
+// =====================================================================
+// Main loop
+// =====================================================================
+const clock = new THREE.Clock();
+let ovTimer = 0, lcdTimer = 0, elapsed = 0;
+const _lb = new V3();
+function setHighlight(key, on) {
+  for (const m of hiList[key]) m.material.emissive.setHex(on ? 0x5a2a00 : 0x000000);
+}
+updateRigVisual(); updateLens();
+window.__jib = { P, H, slots, findTarget, armPointWorld, V3, get frames() { return frameCount; } };
+let frameCount = 0;
+
+renderer.setAnimationLoop((time, frame) => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  elapsed += dt; frameCount++;
+  const xr = renderer.xr.isPresenting;
+
+  if (xr && needFit && frame) { if (doFit(frame)) needFit = false; }
+  if (!xr && needFit) { needFit = false; look.yaw = 0; look.pitch = -0.2; }
+
+  const inp = { jx: 0, jy: 0, zoom: 0, focus: 0, ext: { ty: 0, tp: 0, active: false } };
+  let joyHeld = false, twistHeld = false;
+  const hover = { arm: false, cw: false, column: false, joy: false, knob: false };
+
+  if (xr) {
+    for (const s of slots) {
+      readSlot(s, dt);
+      if (!s.valid) { s.grab = null; s.wasValid = false; continue; }
+      s.wasValid = true;
+      // grip transitions
+      if (s.gripping && !s.grab) {
+        const make = findTarget(s, s.pos);
+        s.grab = make ? make() : { type: 'none' };
+      } else if (!s.gripping && s.grab) s.grab = null;
+      if (!s.gripping) { const make = findTarget(s, s.pos); if (make) { const t = make(); hover[t.type] = true; } }
+      const g = s.grab;
+      if (g) {
+        if (g.type === 'arm') hover.arm = true;
+        if (g.type === 'joy') {
+          const l = boxG.worldToLocal(_lb.copy(s.pos));
+          let dx = (l.x - g.start.x) / 0.05, dz = (l.z - g.start.z) / 0.05;
+          const m = Math.hypot(dx, dz); if (m > 1) { dx /= m; dz /= m; }
+          inp.jy += dx; inp.jx += dz; joyHeld = true; hover.joy = true;
+        } else if (g.type === 'knob') {
+          const a = handYaw(s, g.axis).ang;
+          const d = wrapAngle(a - g.last); g.last = a;
+          UI.knobRot += d; inp.focus += -d / (Math.PI * 2 * 1.2);
+          if (Math.abs(d) > 0.002) H.af = false;
+          hover.knob = true;
+        } else if (g.type === 'arm' && g.twist) {
+          const d = wrapAngle(handRoll(s) - g.rollStart);
+          UI.gripTwist = clamp(d, -0.6, 0.6); twistHeld = true;
+          const a = Math.abs(d);
+          if (a > 0.14) inp.zoom += Math.sign(d) * Math.min(1, (a - 0.14) / 0.42);
+        } else if (g.type === 'cw') {
+          const l = pitchG.worldToLocal(_lb.copy(s.pos));
+          g.target = clamp(g.startD - (l.x - g.startX), CW_MIN, CW_MAX); hover.cw = true;
+        } else if (g.type === 'column') hover.column = true;
+      }
+      // controller sticks & buttons
+      if (s.kind === 'ctrl' && s.gp) {
+        const ax = s.gp.axes, dz = v => Math.abs(v || 0) < 0.15 ? 0 : v;
+        if (s.handed === 'right') { inp.jx += dz(ax[2]); inp.jy += -dz(ax[3]); }
+        else { inp.zoom += -dz(ax[3]); inp.focus += dz(ax[2]) * dt * 0.25; }
+        const bt = s.gp.buttons, prev = s.prevBtn;
+        const edge = i => bt[i] && bt[i].pressed && !prev[i];
+        if (s.handed === 'right') { if (edge(4)) pressButton('REC'); if (edge(5)) pressButton('PLAY'); }
+        else { if (edge(4)) pressButton('AF'); if (edge(5)) pressButton('FIT'); }
+        s.prevBtn = bt.map(b => b.pressed);
+      }
+      // poke buttons with a fingertip
+      if (!s.gripping) {
+        const l = boxG.worldToLocal(_lb.copy(s.tip));
+        for (const b of buttons) {
+          const inside = Math.abs(l.x - b.x) < 0.02 && Math.abs(l.z - b.z) < 0.021 && l.y < KEY_TOP + 0.004 && l.y > KEY_TOP - 0.05;
+          if (inside) {
+            b.depress = 1;
+            if (!s.pokeIn.has(b.name) && elapsed - b.lastFire > 0.35) { b.lastFire = elapsed; pressButton(b.name); }
+            s.pokeIn.add(b.name);
+          } else s.pokeIn.delete(b.name);
+        }
+      } else s.pokeIn.clear();
+    }
+  } else {
+    desktopInput(dt, inp);
+  }
+
+  if (!joyHeld) { UI.joyX *= 0.7; UI.joyY *= 0.7; } else { UI.joyX = clamp(inp.jx, -1, 1); UI.joyY = clamp(inp.jy, -1, 1); }
+  if (!twistHeld) UI.gripTwist *= 0.75;
+  for (const k in hover) setHighlight(k, hover[k]);
+
+  // physics (substepped)
+  if (!play) {
+    const N = 4;
+    for (let i = 0; i < N; i++) physicsStep(dt / N, inp.ext);
+  } else {
+    P.wy = P.wp = 0;
+  }
+
+  // remote head + lens
+  const jx = clamp(inp.jx, -1, 1), jy = clamp(inp.jy, -1, 1);
+  const dzc = v => { const a = Math.abs(v); if (a < 0.1) return 0; const t = (a - 0.1) / 0.9; return Math.sign(v) * t * t; };
+  const kr = damp(dt, 0.12);
+  H.panRate += (-dzc(jx) * 1.2 - H.panRate) * kr;
+  H.tiltRate += (dzc(jy) * 0.8 - H.tiltRate) * kr;
+  H.zoomRate += (clamp(inp.zoom, -1, 1) - H.zoomRate) * damp(dt, 0.18);
+  if (!play) {
+    H.pan += H.panRate * dt;
+    H.tilt = clamp(H.tilt + H.tiltRate * dt, -1.35, 1.0);
+    H.logF = clamp(H.logF + H.zoomRate * dt * Math.log(F_MAX / F_MIN) / 3.5, Math.log(F_MIN), Math.log(F_MAX));
+    if (H.af) {
+      const cp = jibCam.getWorldPosition(_a), ap = _b.set(actor.g.position.x, 1.45, actor.g.position.z);
+      const tu = uFromD(clamp(cp.distanceTo(ap), D_MIN, D_MAX));
+      H.focusU += (tu - H.focusU) * damp(dt, 0.35);
+    } else H.focusU = clamp(H.focusU + inp.focus, 0, 1);
+  }
+
+  // record / playback
+  if (rec) { rec.t += dt; const sn = snap(); sn.t = rec.t; rec.frames.push(sn); }
+  let pb = null;
+  if (play) {
+    play.t += dt;
+    const fr = play.take.frames;
+    if (play.t > fr[fr.length - 1].t) play = null;
+    else { pb = sampleTake(play.take, play.t); actorClock = pb.at; }
+  }
+  if (!pb) actorClock += dt;
+
+  // buttons visual
+  for (const b of buttons) { b.g.position.y = -b.depress * 0.006; b.depress *= 0.8; }
+  tally.material.emissive.setHex(rec && Math.floor(elapsed * 2) % 2 === 0 ? 0xff0000 : 0x000000);
+
+  if (pb) { Object.assign(saved, snap()); applySnap(pb); }
+  updateRigVisual(); updateLens();
+  updateActors(actorClock);
+
+  // render the jib camera feed
+  renderer.shadowMap.needsUpdate = true;
+  const xrWas = renderer.xr.enabled;
+  renderer.xr.enabled = false;
+  for (const m of feedMeshes) m.visible = false;
+  const envWas = envOnly.visible, arsWas = arShadow.visible;
+  envOnly.visible = true; arShadow.visible = false;
+  const prevRT = renderer.getRenderTarget();
+  renderer.setClearColor(0x000000, 1);
+  renderer.setRenderTarget(rtScene); renderer.clear(); renderer.render(scene, jibCam);
+  renderer.setRenderTarget(rtFinal); renderer.render(dofScene, dofCam);
+  renderer.setRenderTarget(prevRT);
+  renderer.setClearColor(0x000000, isAR ? 0 : 1);
+  envOnly.visible = envWas; arShadow.visible = arsWas;
+  for (const m of feedMeshes) m.visible = true;
+  renderer.xr.enabled = xrWas;
+
+  if (pb) { applySnap(saved); updateRigVisual(); updateLens(); }
+
+  ovTimer -= dt; if (ovTimer <= 0) { ovTimer = 1 / 15; drawOverlay(elapsed); }
+  lcdTimer -= dt; if (lcdTimer <= 0) { lcdTimer = 1 / 6; drawLCD(); }
+
+  if (!xr) updateDesktopCamera(dt);
+  renderer.render(scene, camera);
+
+  if (!xr) { // picture-in-picture of the camera feed
+    const w = Math.min(window.innerWidth * 0.36, 520), h = w * 9 / 16;
+    const x = window.innerWidth - w - 16, y = window.innerHeight - h - 16;
+    renderer.setScissorTest(true);
+    renderer.setViewport(x, y, w, h); renderer.setScissor(x, y, w, h);
+    renderer.render(pipScene, pipCam);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+  }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+document.getElementById('hide').onclick = () => { document.getElementById('panel').style.display = 'none'; document.getElementById('show').style.display = 'block'; };
+document.getElementById('show').onclick = () => { document.getElementById('panel').style.display = 'block'; document.getElementById('show').style.display = 'none'; };
+</script>
+</body>
+</html>
